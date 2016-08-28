@@ -82,7 +82,19 @@ func (w *unixConfigure) Configure() error {
 	if err := w.ConfigureBasic(); err != nil {
 		return err
 	}
-	return w.ConfigureJuju()
+	if err := w.ConfigureJuju(); err != nil {
+		return err
+	}
+	return w.ConfigurePostExecute()
+}
+
+func (w *unixConfigure) ConfigurePostExecute() error {
+	if w.os == os.CentOS && w.icfg.Series == "centos6" {
+		w.conf.AddScripts(
+			"shutdown -r +1",
+		)
+	}
+	return nil
 }
 
 // ConfigureBasic updates the provided cloudinit.Config with
@@ -111,17 +123,38 @@ func (w *unixConfigure) ConfigureBasic() error {
 			w.addCleanShutdownJob(initSystem)
 		}
 	case os.CentOS:
-		w.conf.AddScripts(
-			// Mask and stop firewalld, if enabled, so it cannot start. See
-			// http://pad.lv/1492066. firewalld might be missing, in which case
-			// is-enabled and is-active prints an error, which is why the output
-			// is surpressed.
-			"systemctl is-enabled firewalld &> /dev/null && systemctl mask firewalld || true",
-			"systemctl is-active firewalld &> /dev/null && systemctl stop firewalld || true",
+		if w.icfg.Series == "centos6" {
+			w.conf.AddUser(&cloudinit.User{
+				Name:              "syslog",
+				Groups:            []string{"syslog"},
+				Shell:             "/bin/false",
+			})
+			w.conf.AddPackage("dbus")
+			w.conf.AddPackage("at")
+			w.conf.AddScripts(
+				`sed -i "s/^.*requiretty/#Defaults requiretty/" /etc/sudoers`,
+				`echo "ID='centos'" > /etc/os-release`,
+				`echo "VERSION_ID='6'" >> /etc/os-release`,
+			)
+		} else {
+			w.conf.AddScripts(
+				// Mask and stop firewalld, if enabled, so it cannot start. See
+				// http://pad.lv/1492066. firewalld might be missing, in which case
+				// is-enabled and is-active prints an error, which is why the output
+				// is surpressed.
+				"systemctl is-enabled firewalld &> /dev/null && systemctl mask firewalld || true",
+				"systemctl is-active firewalld &> /dev/null && systemctl stop firewalld || true",
 
-			`sed -i "s/^.*requiretty/#Defaults requiretty/" /etc/sudoers`,
-		)
-		w.addCleanShutdownJob(service.InitSystemSystemd)
+				`sed -i "s/^.*requiretty/#Defaults requiretty/" /etc/sudoers`,
+			)
+		}
+	}
+	if (w.icfg.AgentVersion() != version.Binary{}) {
+		initSystem, err := service.VersionInitSystem(w.icfg.Series)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		w.addCleanShutdownJob(initSystem)
 	}
 	SetUbuntuUser(w.conf, w.icfg.AuthorizedKeys)
 	w.conf.SetOutput(cloudinit.OutAll, "| tee -a "+w.icfg.CloudInitOutputLog, "")
